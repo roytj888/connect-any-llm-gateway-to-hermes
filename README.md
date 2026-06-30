@@ -9,6 +9,11 @@
 
 ---
 
+> ⭐ If this saved you time, please star this repo — it helps others find it when they hit the same errors.
+
+---
+
+
 > You bought access to a third-party AI gateway. You installed Hermes Agent. You pasted in the URL and API key.  
 > Then it broke. And the error messages told you nothing useful.  
 >
