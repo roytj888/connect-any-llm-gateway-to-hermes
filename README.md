@@ -1,157 +1,88 @@
-# Connecting a Third-Party AI Gateway to Hermes Agent
+# Connect Any Third-Party LLM Gateway to Hermes Agent
 
-> A real debugging story: 3 errors, 3 fixes — how to connect any third-party OpenAI/Anthropic-compatible API gateway to [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+[![GitHub stars](https://img.shields.io/github/stars/roytj888/connect-any-llm-gateway-to-hermes?style=social)](https://github.com/roytj888/connect-any-llm-gateway-to-hermes/stargazers)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/roytj888/connect-any-llm-gateway-to-hermes/pulls)
+[![Tested on](https://img.shields.io/badge/tested%20on-Windows%2010-blue)](#limitations)
 
-## Who This Is For
-
-If you're using a **third-party API gateway / relay** (中转站) instead of calling OpenAI or Anthropic directly, and you want to use it with Hermes Agent — this guide is for you.
-
-Common examples:
-- A gateway that proxies Anthropic Claude behind a custom URL
-- A gateway that routes to multiple providers under one endpoint
-- Any OpenAI-compatible relay that doesn't support SSE streaming
+**[中文版 README →](README.zh.md)**
 
 ---
 
-## Background
-
-I wanted to use an Anthropic-compatible gateway with Hermes Agent. The gateway exposes its endpoint at:
-
-```
-https://<gateway-host>/v2/gws/<token>/anthropic
-```
-
-What followed was a 3-error debugging journey that took hours to resolve.
+> You bought access to a third-party AI gateway. You installed Hermes Agent. You pasted in the URL and API key.  
+> Then it broke. And the error messages told you nothing useful.  
+>
+> This guide documents every error, every root cause, and every fix — so you don't spend hours on what took me hours to debug.
 
 ---
 
-## Error 1 — `HTTP 401: ApiKey Validate fail`
+## What This Is
 
-### Symptom
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) is an open-source AI agent by NousResearch. It works great with official providers (Anthropic, OpenAI, etc.) but connecting a **third-party API gateway** (relay / 中转站) hits 3 non-obvious problems that aren't documented anywhere:
 
-```
-API call failed: HTTP 401: ApiKey Validate fail
-```
+| # | Symptom | Root Cause |
+|---|---------|-----------|
+| 1 | `401 ApiKey Validate fail` | Hermes auto-detects URLs ending in `/anthropic` and switches to Anthropic SDK auth — which third-party gateways don't support |
+| 2 | `empty stream with no finish_reason` | Most gateways fake streaming: they return plain JSON for `stream: true` instead of real SSE chunks |
+| 3 | Config reverts on restart | Hermes Desktop overwrites `config.yaml` on exit if the app is running when you edit it |
 
-### Root Cause
-
-Hermes has URL-based auto-detection in `agent/anthropic_adapter.py`. Any URL path ending in `/anthropic` triggers the **Anthropic native SDK** with `x-api-key` header auth — even for third-party gateways:
-
-```python
-def _endpoint_speaks_anthropic_messages(base_url: str) -> bool:
-    path = urlparse(normalized).path.rstrip("/")
-    if path.endswith("/anthropic") or path.endswith("/anthropic/v1"):
-        return True  # triggers for ANY url ending in /anthropic!
-```
-
-Your gateway doesn't understand Anthropic's native `x-api-key` format, so it returns 401.
-
-### Fix
-
-Use the **gateway root URL** (without `/anthropic`) and force `transport: chat_completions` in `config.yaml`:
-
-```yaml
-providers:
-  my-gateway:
-    api: https://<gateway-host>/v2/gws/<token>    # ← root URL, no /anthropic
-    transport: chat_completions                     # ← force OpenAI-compatible mode
-    api_key: <your-api-key>
-    default_model: <model-name>
-
-model:
-  default: <model-name>
-  provider: custom:my-gateway
-  base_url: https://<gateway-host>/v2/gws/<token>
-```
+This repo documents all three, plus a **ready-to-install Hermes Skill** that automates the whole setup.
 
 ---
 
-## Error 2 — `Provider returned an empty stream with no finish_reason`
+## Option A — Use the Hermes Skill (Recommended)
 
-### Symptom
-
-```
-API call failed after 3 retries: Provider returned an empty stream 
-with no finish_reason (possible upstream error or malformed SSE response).
-```
-
-### Root Cause
-
-Many third-party gateways **do not support real SSE streaming**. When Hermes sends `stream: true`, the gateway ignores it and returns a complete JSON response — not the `data: {...}` chunked SSE format Hermes expects.
-
-Verify this yourself with curl:
+Install the skill and let Hermes configure itself:
 
 ```bash
-# Send stream: true — gateway returns plain JSON, not SSE chunks
-curl https://<gateway-host>/v2/gws/<token>/v1/chat/completions \
-  -H "Authorization: Bearer <key>" \
-  -H "content-type: application/json" \
-  -d '{"model":"<model>","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"stream":true}'
-
-# If you get back: {"id":"...","choices":[{"message":{"content":"Hi!"}}],...}
-# and NOT:         data: {"choices":[{"delta":{"content":"Hi"}}]}
-# → your gateway doesn't support real streaming
+hermes skills install https://raw.githubusercontent.com/roytj888/connect-any-llm-gateway-to-hermes/main/llm-gateway-connect.skill.md
 ```
 
-### Fix
+Then in Hermes:
 
-Patch `agent/chat_completion_helpers.py` in your Hermes installation to redirect requests for your provider to the non-streaming path.
-
-Find the `interruptible_streaming_api_call` function and add these lines right after the docstring:
-
-```python
-def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=None):
-    """...(existing docstring)..."""
-
-    # Fix for gateways that don't support real SSE streaming.
-    # Replace "my-gateway" with your provider name.
-    if (
-        isinstance(getattr(agent, "provider", ""), str)
-        and "my-gateway" in agent.provider
-    ):
-        return interruptible_api_call(agent, api_kwargs)
-
-    # ... rest of function unchanged
+```
+Help me connect my third-party gateway:
+URL: https://your-gateway.com/v2/gws/abc123
+API Key: your-api-key
+Model: your-model-name
 ```
 
-The file is at: `%LOCALAPPDATA%\hermes\hermes-agent\agent\chat_completion_helpers.py` (Windows)
+Hermes will run through the checklist, test your gateway, apply the right config, and patch the code if needed.
 
 ---
 
-## Error 3 — Config Reverts on Restart
+## Option B — Manual Setup
 
-### Symptom
+### Step 1: Find your gateway root URL
 
-You edit `config.yaml`, restart Hermes, but it goes back to the old provider.
+If your URL looks like:
+```
+https://gateway.example.com/v2/gws/abc123/anthropic
+```
+Use only the **root path** — drop `/anthropic` and anything after:
+```
+https://gateway.example.com/v2/gws/abc123
+```
 
-### Root Cause
+### Step 2: Edit `config.yaml`
 
-The Hermes Desktop app writes config on exit. If you edit `config.yaml` while the app is running, the app **overwrites your changes** when it saves state.
+- Windows: `%LOCALAPPDATA%\hermes\config.yaml`
+- macOS / Linux: `~/.hermes/config.yaml`
 
-### Fix
-
-1. **Fully quit Hermes Desktop** — right-click tray icon → Exit, or kill `Hermes.exe` in Task Manager
-2. Edit `config.yaml`
-3. **Cold-start Hermes** (launch fresh, don't resume a minimized window)
-
----
-
-## Final Working Configuration
-
-**`config.yaml`** (Windows: `%LOCALAPPDATA%\hermes\config.yaml`):
+> ⚠️ **Quit Hermes Desktop completely before editing.** Right-click tray → Exit, or kill `Hermes.exe` in Task Manager. If the app is running, it will overwrite your changes on exit.
 
 ```yaml
 model:
-  default: <your-model-name>
+  default: your-model-name
   provider: custom:my-gateway
-  base_url: https://<gateway-host>/<gateway-path>
+  base_url: https://gateway.example.com/v2/gws/abc123
 
 providers:
   my-gateway:
-    api: https://<gateway-host>/<gateway-path>
-    transport: chat_completions
-    api_key: <your-api-key>
-    default_model: <your-model-name>
+    api: https://gateway.example.com/v2/gws/abc123
+    transport: chat_completions      # force OpenAI-compatible mode
+    api_key: your-api-key
+    default_model: your-model-name
 
 display:
   streaming: false
@@ -160,42 +91,124 @@ streaming:
   enabled: false
 ```
 
-**`agent/chat_completion_helpers.py`** — add at the top of `interruptible_streaming_api_call`:
+### Step 3: Check if your gateway supports real streaming
 
-```python
-if (
-    isinstance(getattr(agent, "provider", ""), str)
-    and "my-gateway" in agent.provider   # ← your provider name
-):
-    return interruptible_api_call(agent, api_kwargs)
+```bash
+curl https://your-gateway-root/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "content-type: application/json" \
+  -d '{"model":"your-model","max_tokens":20,"messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
+**Real SSE (no patch needed):**
+```
+data: {"choices":[{"delta":{"content":"Hi"}}]}
+data: [DONE]
+```
+
+**Fake streaming (patch required):**
+```json
+{"id":"...","choices":[{"message":{"content":"Hi!"}}],"finish_reason":"stop"}
+```
+
+### Step 4: Patch Hermes (only if fake streaming)
+
+File:
+- Windows: `%LOCALAPPDATA%\hermes\hermes-agent\agent\chat_completion_helpers.py`
+- macOS / Linux: `~/.hermes/hermes-agent/agent/chat_completion_helpers.py`
+
+Find `interruptible_streaming_api_call` and add right after the docstring:
+
+```python
+def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=None):
+    """...(existing docstring unchanged)..."""
+
+    # Fix: gateway doesn't support real SSE — redirect to non-streaming path
+    if (
+        isinstance(getattr(agent, "provider", ""), str)
+        and "my-gateway" in agent.provider    # ← your provider name from config
+    ):
+        return interruptible_api_call(agent, api_kwargs)
+
+    # rest of function unchanged...
+```
+
+### Step 5: Cold-start Hermes
+
+Launch Hermes fresh (not from a minimized window). You should see your gateway listed as the active provider.
+
 ---
 
-## Summary Table
+## How to Use After Setup
 
-| # | Error | Root Cause | Fix |
-|---|-------|-----------|-----|
-| 1 | `401 auth fail` | URL ends in `/anthropic` → Hermes uses Anthropic SDK with wrong auth | Use root gateway URL + `transport: chat_completions` |
-| 2 | `empty stream / no finish_reason` | Gateway returns plain JSON for `stream:true`, not real SSE | Patch `interruptible_streaming_api_call` to use non-streaming path |
-| 3 | Config reverts on restart | Desktop app overwrites config on exit | Fully quit desktop before editing config |
+Everything works the same as with an official provider:
 
----
+```
+# In Hermes chat
+/model custom:my-gateway:your-model-name   # switch to your gateway mid-session
+```
 
-## Quick Checklist for Any Third-Party Gateway
-
-- [ ] Test with curl: does `stream: true` return real `data:` SSE chunks, or complete JSON?
-- [ ] Test auth: does it accept `x-api-key` or `Authorization: Bearer`?
-- [ ] Use the root gateway URL, not a sub-path ending in `/anthropic` or `/v1`
-- [ ] Set `transport: chat_completions` explicitly in `providers:` config
-- [ ] Fully quit Hermes Desktop before editing config
-- [ ] If the gateway doesn't stream: patch `interruptible_streaming_api_call`
+Your gateway appears in the `hermes model` picker. No difference in day-to-day use.
 
 ---
 
-## Environment
+## Error Reference
 
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent) (NousResearch)
-- Windows 10
-- Third-party Anthropic-compatible gateway
-- Model: Claude Sonnet 4.6 via gateway
+### `HTTP 401: ApiKey Validate fail`
+
+Hermes auto-detects URLs ending in `/anthropic` and switches to the Anthropic native SDK (using `x-api-key` header). Third-party gateways don't recognize this auth format.
+
+**Fix:** Use root gateway URL + `transport: chat_completions`.
+
+---
+
+### `empty stream with no finish_reason (possible upstream error or malformed SSE response)`
+
+Your gateway returns a complete JSON object for `stream: true` instead of real SSE. Hermes iterates over zero chunks, finds no `finish_reason`, and throws.
+
+**Fix:** Patch `interruptible_streaming_api_call`. See Step 4.
+
+---
+
+### Config reverts on restart
+
+Hermes Desktop saves its state (including model config) to `config.yaml` on exit. Edits made while the app is running get overwritten.
+
+**Fix:** Quit Hermes fully before editing config.
+
+---
+
+## Limitations
+
+| Item | Status |
+|------|--------|
+| Windows 10 | ✅ Tested and working |
+| macOS | ⚠️ Not tested. Config path and file paths differ (see above). Should work in theory. **PRs welcome.** |
+| Linux | ⚠️ Not tested. Same paths as macOS. **PRs welcome.** |
+| Gateways with real SSE streaming | ✅ Skip Step 4, just do config |
+| Gateways requiring `x-api-key` auth | ⚠️ May need `transport: anthropic_messages` — see [Hermes provider docs](https://hermes-agent.nousresearch.com/docs/integrations/providers) |
+| Hermes version | Tested on latest as of June 2026. File paths may change in future versions. |
+
+---
+
+## Checklist
+
+- [ ] Using root gateway URL (no `/anthropic` suffix)
+- [ ] `transport: chat_completions` set explicitly
+- [ ] Hermes Desktop fully quit before editing config
+- [ ] Tested streaming with curl
+- [ ] Applied patch if gateway uses fake streaming
+- [ ] Cold-started Hermes
+
+---
+
+## Contributing
+
+Tested on macOS or Linux? Please open a PR updating the Limitations table.  
+Different gateway quirk not covered here? Issues and PRs welcome.
+
+---
+
+## License
+
+MIT
